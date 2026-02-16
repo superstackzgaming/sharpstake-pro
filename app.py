@@ -3,154 +3,176 @@ import pandas as pd
 import requests
 
 # --- CONFIGURATION ---
-API_KEY = "818d64a21306f003ad587fbb0bd5958b" # Your Key
+API_KEY = "818d64a21306f003ad587fbb0bd5958b"
 REGION = "us"
 DFS_REGION = "us_dfs"
 
-SPORTS = {
-    "All Sports": "all",
-    "NBA": "basketball_nba",
-    "NFL": "americanfootball_nfl",
-    "NHL": "icehockey_nhl",
-    "College Basketball": "basketball_ncaab",
-    "Soccer (EPL)": "soccer_epl"
-}
+st.set_page_config(page_title="SharpStake Optimizer", layout="wide")
 
-MARKETS = {
-    "Points": "player_points",
-    "Rebounds": "player_rebounds",
-    "Assists": "player_assists",
-    "Goals": "player_goals_scored",
-    "Shots": "player_shots_on_goal"
-}
+# --- CUSTOM CSS (Make it look like OddsJam) ---
+st.markdown("""
+<style>
+    .stDataFrame { font-size: 14px; }
+    div[data-testid="stMetricValue"] { font-size: 18px; }
+    .ev-green { color: #00ff00; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
 
-st.set_page_config(page_title="SharpStake Pro", layout="wide")
-st.title("🔥 SharpStake: The EV Board")
+st.title("⚡ SharpStake Fantasy Optimizer")
 
-# --- SIDEBAR ---
-sport_name = st.sidebar.selectbox("Sport", list(SPORTS.keys()))
-dfs_site = st.sidebar.selectbox("DFS Site", ["PrizePicks", "Underdog Fantasy", "Betr"])
-min_ev = st.sidebar.slider("Min EV %", 0.0, 10.0, 1.5)
+# --- SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.header("⚙️ Settings")
+    sport_key = st.selectbox("Sport", ["basketball_nba", "icehockey_nhl", "soccer_epl"], index=1)
+    dfs_site = st.selectbox("DFS Site", ["PrizePicks", "Underdog Fantasy"])
+    
+    # Dynamic Break-Even Rates
+    break_even = 54.34 if dfs_site == "PrizePicks" else 55.0
+    st.caption(f"Break-Even Win %: **{break_even}%**")
+    
+    min_ev = st.slider("Min EV %", 0.0, 15.0, 1.5)
+    
+    # Market Filter
+    market_map = {
+        "basketball_nba": "player_points",
+        "icehockey_nhl": "player_points", 
+        "soccer_epl": "player_goals_scored"
+    }
+    market_key = market_map.get(sport_key, "player_points")
 
 # --- ENGINE ---
-def get_ev_data():
-    all_plays = []
+def get_optimizer_data():
+    all_rows = []
     
-    # Determine which sports to scan
-    sports_to_scan = [SPORTS[sport_name]] if sport_name != "All Sports" else [v for k,v in SPORTS.items() if v != "all"]
+    # 1. Get Games
+    events = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport_key}/events", params={"apiKey": API_KEY}).json()
+    if not events: return pd.DataFrame()
+
+    # Progress Bar
+    progress_text = "Scanning Sharps..."
+    my_bar = st.progress(0, text=progress_text)
     
-    for sport_key in sports_to_scan:
-        # 1. Get Games
-        events = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport_key}/events", params={"apiKey": API_KEY}).json()
-        if not events: continue
+    # SCAN FIRST 5 GAMES
+    for i, event in enumerate(events[:5]):
+        game_id = event['id']
+        game_label = f"{event['home_team']} vs {event['away_team']}"
+        my_bar.progress((i + 1) * 20, text=f"Checking {game_label}...")
 
-        # CHECK FIRST 3 GAMES PER SPORT
-        for event in events[:3]:
-            game_id = event['id']
-            game_label = f"{event['home_team']} vs {event['away_team']}"
-            
-            # Check MAIN props (Points/Goals)
-            market_key = "player_points" if "basketball" in sport_key else "player_goals_scored"
-            
-            # 2. GET DFS LINES
-            dfs_resp = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
-                params={
-                    "apiKey": API_KEY,
-                    "regions": DFS_REGION,
-                    "markets": market_key,
-                    "oddsFormat": "american",
-                    "bookmakers": dfs_site.lower().replace(" ", "")
-                }
-            ).json()
-            
-            if not dfs_resp.get('bookmakers'): continue
-            
-            # 3. GET SHARP ODDS
-            sharp_resp = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
-                params={
-                    "apiKey": API_KEY,
-                    "regions": REGION,
-                    "markets": market_key,
-                    "oddsFormat": "american",
-                    "bookmakers": "draftkings,fanduel"
-                }
-            ).json()
+        # 2. Get DFS & Sharp Odds in Parallel
+        # (For speed, we'd use async, but this is simple sync code)
+        
+        # A. DFS Lines
+        dfs_resp = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
+            params={"apiKey": API_KEY, "regions": DFS_REGION, "markets": market_key, "oddsFormat": "american", "bookmakers": dfs_site.lower().replace(" ", "")}
+        ).json()
+        
+        # B. Sharp Lines (Pinnacle/DK)
+        sharp_resp = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
+            params={"apiKey": API_KEY, "regions": REGION, "markets": market_key, "oddsFormat": "american", "bookmakers": "pinnacle,draftkings"}
+        ).json()
 
-            # 4. MATCH & BUILD CARDS
-            dfs_book = dfs_resp['bookmakers'][0]
-            for mkt in dfs_book.get('markets', []):
-                for outcome in mkt.get('outcomes', []):
-                    player = outcome['name']
-                    line = outcome.get('point', 0)
+        if not dfs_resp.get('bookmakers'): continue
+
+        # 3. MATCH LOGIC
+        dfs_book = dfs_resp['bookmakers'][0]
+        for mkt in dfs_book.get('markets', []):
+            for outcome in mkt.get('outcomes', []):
+                player = outcome['name']
+                line = outcome.get('point', 0)
+                
+                # Find Sharp Odds for this specific line
+                best_side, win_prob, sharp_odds_str = find_sharp_edge(sharp_resp, player, line)
+                
+                if win_prob > 0:
+                    ev = (win_prob * 100) - break_even
                     
-                    # Find Sharp Odds for BOTH sides
-                    over_prob, under_prob = find_sharp_probs(sharp_resp, player, line)
-                    
-                    # Calculate EV
-                    over_ev = (over_prob * 100) - 54.34
-                    under_ev = (under_prob * 100) - 54.34
-                    
-                    if over_ev > min_ev or under_ev > min_ev:
-                        all_plays.append({
-                            "Sport": sport_key,
-                            "Game": game_label,
+                    if ev >= min_ev:
+                        all_rows.append({
                             "Player": player,
+                            "Game": game_label,
+                            "Prop": market_key.replace("player_", "").title(),
                             "Line": line,
-                            "Prop": market_key,
-                            "Over EV": over_ev,
-                            "Under EV": under_ev
+                            "Pick": best_side.upper(),
+                            "Sharp Odds": sharp_odds_str,
+                            "Win %": win_prob * 100, # Keep as number for sorting
+                            "EV %": ev               # Keep as number for sorting
                         })
     
-    return sorted(all_plays, key=lambda x: max(x['Over EV'], x['Under EV']), reverse=True)
+    my_bar.empty()
+    return pd.DataFrame(all_rows)
 
-def find_sharp_probs(sharp_data, player, target_line):
-    over_probs = []
-    under_probs = []
+def find_sharp_edge(sharp_data, player, target_line):
+    # Search for matching player + line
+    # Returns: (Best Side, Win %, Sharp Odds String)
     
     for book in sharp_data.get('bookmakers', []):
         for mkt in book.get('markets', []):
             for outcome in mkt.get('outcomes', []):
+                # Loose Match
                 if outcome['name'] == player or outcome.get('description') == player:
                     if abs(outcome.get('point', 0) - target_line) < 0.1:
+                        
+                        # We found the line! Now check price.
                         price = outcome.get('price', 0)
-                        prob = 100 / (price + 100) if price > 0 else (-price) / (-price + 100)
+                        side = outcome.get('name', 'Over') # Usually 'Over' or 'Under'
                         
-                        if outcome.get('name') == 'Over': over_probs.append(prob)
-                        elif outcome.get('name') == 'Under': under_probs.append(prob)
-    
-    avg_over = sum(over_probs)/len(over_probs) if over_probs else 0
-    avg_under = sum(under_probs)/len(under_probs) if under_probs else 0
-    return avg_over, avg_under
+                        # Calculate Prob
+                        if price > 0: prob = 100 / (price + 100)
+                        else: prob = (-price) / (-price + 100)
+                        
+                        # Format "Sharp Odds" text
+                        sharp_str = f"{book['title']}: {price}"
+                        
+                        return side, prob, sharp_str
 
-# --- DISPLAY (The PrizePicks Layout) ---
-if st.button("🚀 Find Best Plays"):
-    with st.spinner("Scanning Market..."):
-        plays = get_ev_data()
+    return None, 0.0, ""
+
+# --- MAIN UI ---
+if st.button("🔄 Refresh Optimizer"):
+    df = get_optimizer_data()
+    
+    if not df.empty:
+        # Sort by EV
+        df = df.sort_values(by="EV %", ascending=False)
         
-        if not plays:
-            st.warning("No +EV plays found right now.")
-        else:
-            for p in plays:
-                # Create a "Card" for each player
-                with st.container():
-                    col1, col2, col3, col4 = st.columns([2, 1, 2, 2])
-                    
-                    with col1:
-                        st.markdown(f"**{p['Player']}**")
-                        st.caption(f"{p['Game']}")
-                    
-                    with col2:
-                        st.metric("Line", f"{p['Line']}")
-                    
-                    with col3:
-                        # Color code EV
-                        over_color = "green" if p['Over EV'] > 0 else "red"
-                        st.markdown(f":{over_color}[**OVER**] {p['Over EV']:.1f}% EV")
-                        
-                    with col4:
-                        under_color = "green" if p['Under EV'] > 0 else "red"
-                        st.markdown(f":{under_color}[**UNDER**] {p['Under EV']:.1f}% EV")
-                    
-                    st.divider()
+        # Metric Cards at Top
+        top_play = df.iloc[0]
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Top Play", top_play['Player'])
+        col2.metric("Pick", f"{top_play['Pick']} {top_play['Line']}")
+        col3.metric("EV", f"{top_play['EV %']:.1f}%")
+        
+        st.divider()
+        
+        # THE OPTIMIZER TABLE
+        st.dataframe(
+            df,
+            column_config={
+                "Player": st.column_config.TextColumn("Player", width="medium"),
+                "Game": st.column_config.TextColumn("Matchup", width="small"),
+                "Prop": st.column_config.TextColumn("Prop", width="small"),
+                "Line": st.column_config.NumberColumn("Line", format="%.1f"),
+                "Pick": st.column_config.TextColumn("Pick", width="small"),
+                "Sharp Odds": st.column_config.TextColumn("Sharp Odds", width="medium"),
+                
+                "Win %": st.column_config.ProgressColumn(
+                    "Win %",
+                    format="%.1f%%",
+                    min_value=50,
+                    max_value=75,
+                ),
+                "EV %": st.column_config.ProgressColumn(
+                    "Edge (EV)",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=15,
+                ),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+    else:
+        st.warning(f"No +EV plays found for {sport_key} on {dfs_site}.")
+        st.info("Try lowering the Min EV % or switching sports.")
