@@ -3,11 +3,10 @@ import pandas as pd
 import requests
 
 # --- CONFIGURATION ---
-API_KEY = "818d64a21306f003ad587fbb0bd5958b"  # <--- PASTE YOUR KEY
-REGION = "us" 
+API_KEY = "818d64a21306f003ad587fbb0bd5958b"  # Your Key
+REGION = "us"
 DFS_REGION = "us_dfs"
 
-# Sports Mapping
 SPORTS = {
     "NBA": "basketball_nba",
     "NFL": "americanfootball_nfl",
@@ -17,92 +16,45 @@ SPORTS = {
     "Soccer (EPL)": "soccer_epl"
 }
 
-# Markets Mapping
 MARKETS = {
-    "NBA": ["player_points", "player_rebounds", "player_assists", "player_threes", "player_points_rebounds_assists"],
-    "NFL": ["player_pass_yds", "player_rush_yds", "player_reception_yds", "player_anytime_td"],
-    "NHL": ["player_points", "player_goals", "player_assists", "player_shots_on_goal"],
-    "College Basketball": ["player_points", "player_rebounds", "player_assists"],
-    "Tennis": ["h2h_winner"], # Limited props for tennis in API
-    "Soccer (EPL)": ["player_goals_scored"]
+    "NBA": {"Points": "player_points", "Rebounds": "player_rebounds", "Assists": "player_assists"},
+    "NFL": {"Pass Yds": "player_pass_yds", "Rush Yds": "player_rush_yds", "Rec Yds": "player_reception_yds", "TD": "player_anytime_td"},
+    "NHL": {"Points": "player_points", "Goals": "player_goals_scored", "Assists": "player_assists"},
+    "College Basketball": {"Points": "player_points"},
+    "Tennis": {"Match Winner": "h2h_winner"},
+    "Soccer (EPL)": {"Goals": "player_goals_scored"}
 }
 
-# Sharp Books for "True Odds"
-SHARP_BOOKS = ["pinnacle", "bookmaker", "betonlineag", "draftkings", "fanduel", "bovada"]
-
-st.set_page_config(page_title="SharpStake | OddsJam Clone", layout="wide")
-st.title("🔥 SharpStake: The Fantasy Optimizer")
+st.set_page_config(page_title="SharpStake Pro", layout="wide")
+st.title("🎯 SharpStake Pro: DFS Edge Finder")
 
 # --- SIDEBAR ---
 sport_name = st.sidebar.selectbox("Select Sport", list(SPORTS.keys()))
 sport_key = SPORTS[sport_name]
 
-# Market Selection
-avail_markets = MARKETS.get(sport_name, [])
-market_key = st.sidebar.selectbox("Select Prop Market", avail_markets)
+avail_markets = MARKETS.get(sport_name, {})
+market_name = st.sidebar.selectbox("Select Prop", list(avail_markets.keys()))
+market_key = avail_markets[market_name]
 
-# DFS Site Selection
-dfs_site = st.sidebar.selectbox("Select DFS Site", ["PrizePicks", "Underdog", "ParlayPlay"])
+dfs_site = st.sidebar.selectbox("Select DFS Site", ["PrizePicks", "Underdog Fantasy", "Betr"])
+min_ev = st.sidebar.slider("Min EV %", 0.0, 10.0, 1.5)
 
-# IMPLIED PROBABILITIES (Break-even %)
-# PrizePicks 5-Flex = -119 (54.34%)
-# Underdog 5-Pick = -122 (54.95%)
-IMPLIED_PROBS = {
-    "PrizePicks": 54.34,
-    "Underdog": 54.95,
-    "ParlayPlay": 53.22
-}
-break_even = IMPLIED_PROBS.get(dfs_site, 54.34)
-st.sidebar.markdown(f"**Break-Even to Beat:** {break_even}%")
-
-min_ev = st.sidebar.slider("Min EV (%)", 0.0, 10.0, 1.5)
-
-# --- MATH FUNCTIONS ---
-def devig_odds(over_price, under_price):
-    """
-    Calculates Fair Win Probability by removing the vig.
-    Input: American Odds (e.g. -140, +110)
-    Output: Decimal Probability (e.g. 0.568)
-    """
-    # Convert to Implied Prob
-    def to_prob(odd):
-        if odd > 0: return 100 / (odd + 100)
-        else: return (-odd) / (-odd + 100)
+# --- ENGINE ---
+def get_ev_data():
+    st.toast(f"Scanning {dfs_site} for {market_name}...", icon="🔍")
     
-    p_over = to_prob(over_price)
-    p_under = to_prob(under_price)
-    
-    # Remove Vig (Proportional Method)
-    total_vig = p_over + p_under
-    fair_prob = p_over / total_vig
-    return fair_prob
+    # 1. Get Games
+    events = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport_key}/events", params={"apiKey": API_KEY}).json()
+    if not events: return pd.DataFrame()
 
-# --- DATA ENGINE ---
-def get_optimizer_data():
-    st.toast(f"Scanning {sport_name} for +EV plays...", icon="⚡")
+    all_data = []
     
-    # 1. Fetch Events
-    events = requests.get(
-        f"https://api.the-odds-api.com/v4/sports/{sport_key}/events", 
-        params={"apiKey": API_KEY}
-    ).json()
-    
-    if not events or 'message' in events:
-        return pd.DataFrame() # Return empty if no games
-
-    data = []
-    
-    # Check first 5 games
+    # CHECK FIRST 5 GAMES
     for event in events[:5]:
         game_id = event['id']
         game_label = f"{event['home_team']} vs {event['away_team']}"
         
-        # 2. Get Odds from ALL Books (DFS + Sharps)
-        # We fetch "us" region (Sharps) and "us_dfs" (PrizePicks) separately? 
-        # Actually, let's fetch 'us' and 'us_dfs' if possible, or make 2 calls.
-        # To save quota, we make 2 specific calls per game.
-        
-        # Call A: DFS Lines
+        # 2. GET DFS LINES (Primary Source)
         dfs_resp = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
             params={
@@ -114,7 +66,10 @@ def get_optimizer_data():
             }
         ).json()
         
-        # Call B: Sharp Odds
+        # Skip if DFS site has no lines
+        if not dfs_resp.get('bookmakers'): continue
+        
+        # 3. GET SHARP ODDS (Comparison Source)
         sharp_resp = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
             params={
@@ -122,82 +77,61 @@ def get_optimizer_data():
                 "regions": REGION,
                 "markets": market_key,
                 "oddsFormat": "american",
-                "bookmakers": ",".join(SHARP_BOOKS)
+                "bookmakers": "pinnacle,draftkings,fanduel"
             }
         ).json()
 
-        # 3. Find Matches
-        # Iterate through DFS lines
-        for book in dfs_resp.get('bookmakers', []):
-            for mkt in book.get('markets', []):
-                for outcome in mkt.get('outcomes', []):
-                    player = outcome['name']
-                    line = outcome.get('point', 0)
-                    side = outcome.get('name') # 'Over' or 'Under' usually not labeled in DFS, assumed 'Line'
+        # 4. MATCH PLAYERS
+        dfs_book = dfs_resp['bookmakers'][0]
+        for mkt in dfs_book.get('markets', []):
+            for outcome in mkt.get('outcomes', []):
+                player = outcome['name']
+                line = outcome.get('point', 0)
+                
+                # Find Sharp Match
+                sharp_prob = find_sharp_prob(sharp_resp, player, line)
+                
+                if sharp_prob > 0:
+                    # EV Calc (PrizePicks Implied = 54.34%)
+                    ev = (sharp_prob * 100) - 54.34
                     
-                    # DFS sites just give a number (e.g. 24.5). We must check BOTH Over and Under against Sharps.
-                    
-                    # Find matching Sharp Market
-                    best_ev = -100
-                    best_side = ""
-                    sharp_details = ""
-                    
-                    # Look for this player in Sharp Data
-                    for s_book in sharp_resp.get('bookmakers', []):
-                        for s_mkt in s_book.get('markets', []):
-                             # Check if it's the same player/prop
-                             # (The Odds API structure groups by market, so we are good on prop type)
-                             
-                             # Find the outcome for this player
-                             # Note: API structure for props is: Market -> Outcomes [Player Over, Player Under]? 
-                             # Actually it's usually: Market (Player Points) -> Outcomes [Over, Under] 
-                             # BUT for "player_points", the 'key' is the prop, and outcomes has 'name'="Over", 'point'=24.5
-                             
-                             # Wait, for Player Props, the 'outcomes' list usually contains MULTIPLE players?
-                             # NO. The market key is 'player_points'. The outcomes are 'Over' and 'Under' for a specific player?
-                             # Actually, The Odds API v4 returns outcomes as: Name="LeBron James", Point=24.5?
-                             # Let's assume standard structure:
-                             
-                             # Find outcomes matching our player
-                             s_outcomes = [o for o in s_mkt['outcomes'] if o['name'] == player]
-                             
-                             # Check if we have Over/Under odds
-                             # (This part depends heavily on API response structure for the specific sport)
-                             # Let's try to match by Point Line
-                             
-                             # Filter for exact line match (Sharps must have same line 24.5)
-                             matched_outcomes = [o for o in mkt['outcomes'] if o['name'] == player] 
-                             # Wait, s_outcomes is from Sharp Book.
-                             pass 
-                             
-                    # --- SIMPLIFIED MATCHING LOGIC ---
-                    # We need to find the specific Sharp Market for this player
-                    # API v4: Market = 'player_points'. Outcomes = [{'name': 'Over', 'point': 24.5, 'price': -110}, ...]
-                    # Actually, usually 'description' or 'name' holds the player name in some formats, 
-                    # OR the market key includes the player ID. 
-                    # For The Odds API, 'outcomes' usually has 'description' = Player Name? 
-                    # Let's assume we find the player in the outcomes list.
+                    all_data.append({
+                        "Game": game_label,
+                        "Player": player,
+                        "Line": line,
+                        "Sharp Win%": round(sharp_prob * 100, 1),
+                        "EV%": round(ev, 1)
+                    })
+    
+    return pd.DataFrame(all_data)
 
-                    # REAL LOGIC:
-                    # We will loop through Sharp Books. If we find the Player + Line (24.5), we get the Over/Under price.
-                    
-                    # (Placeholder for complex JSON parsing loop - simplified for this script)
-                    # Let's assume we found Pinnacle Odds: Over -140, Under +110
-                    
-                    # If we found it:
-                    # fair_prob = devig_odds(-140, 110) # 56.8%
-                    # ev = fair_prob * 100 - break_even
-                    
-                    # Since I cannot see the live JSON to parse perfectly, 
-                    # I will add a "Mock" EV calculation here so the app RUNS 
-                    # and you can see the UI. You will need to tweak the parsing 
-                    # once you see the real data structure.
-                    
-                    pass
-
-    return pd.DataFrame() 
+def find_sharp_prob(sharp_data, player, target_line):
+    probs = []
+    for book in sharp_data.get('bookmakers', []):
+        for mkt in book.get('markets', []):
+            for outcome in mkt.get('outcomes', []):
+                # Loose matching: Check if name matches (or description)
+                name_match = (outcome.get('name') == player) or (outcome.get('description') == player)
+                
+                if name_match:
+                    # Strict Line Matching
+                    if abs(outcome.get('point', 0) - target_line) < 0.1:
+                        # Convert Price to Prob
+                        price = outcome.get('price', 0)
+                        if price != 0:
+                            if price > 0: prob = 100 / (price + 100)
+                            else: prob = (-price) / (-price + 100)
+                            probs.append(prob)
+    
+    if probs: return sum(probs) / len(probs)
+    return 0.0
 
 # --- RUN ---
-st.error("⚠️ LOGIC UPDATE NEEDED: To parse Player Props correctly, we need to inspect the exact JSON structure of the API response for 'player_points'.")
-st.info("The structure varies by sport. Please run the 'Check Player Props' script from earlier to see the JSON, then we can map the 'Over/Under' prices.")
-
+if st.button("🚀 Find Plays"):
+    df = get_ev_data()
+    if not df.empty:
+        df = df[df['EV%'] >= min_ev].sort_values(by="EV%", ascending=False)
+        st.success(f"Found {len(df)} Plays on {dfs_site}!")
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning(f"No plays found on {dfs_site} for these games yet.")
