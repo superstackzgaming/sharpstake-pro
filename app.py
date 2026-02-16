@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 
 # --- CONFIGURATION ---
-API_KEY = "818d64a21306f003ad587fbb0bd5958b"  # Your Key
+API_KEY = "818d64a21306f003ad587fbb0bd5958b" # Your Key
 REGION = "us"
 DFS_REGION = "us_dfs"
 
@@ -12,21 +12,20 @@ SPORTS = {
     "NFL": "americanfootball_nfl",
     "NHL": "icehockey_nhl",
     "College Basketball": "basketball_ncaab",
-    "Tennis": "tennis_atp_wta_all",
     "Soccer (EPL)": "soccer_epl"
 }
 
+# ONLY Player Props (No Match Winners)
 MARKETS = {
-    "NBA": {"Points": "player_points", "Rebounds": "player_rebounds", "Assists": "player_assists"},
+    "NBA": {"Points": "player_points", "Rebounds": "player_rebounds", "Assists": "player_assists", "Threes": "player_threes"},
     "NFL": {"Pass Yds": "player_pass_yds", "Rush Yds": "player_rush_yds", "Rec Yds": "player_reception_yds", "TD": "player_anytime_td"},
-    "NHL": {"Points": "player_points", "Goals": "player_goals_scored", "Assists": "player_assists"},
+    "NHL": {"Points": "player_points", "Goals": "player_goals_scored", "Assists": "player_assists", "Shots": "player_shots_on_goal"},
     "College Basketball": {"Points": "player_points"},
-    "Tennis": {"Match Winner": "h2h_winner"},
-    "Soccer (EPL)": {"Goals": "player_goals_scored"}
+    "Soccer (EPL)": {"Goals": "player_goals_scored", "Assists": "player_assists"}
 }
 
 st.set_page_config(page_title="SharpStake Pro", layout="wide")
-st.title("🎯 SharpStake Pro: DFS Edge Finder")
+st.title("🎯 SharpStake Pro: Player Props Engine")
 
 # --- SIDEBAR ---
 sport_name = st.sidebar.selectbox("Select Sport", list(SPORTS.keys()))
@@ -110,11 +109,9 @@ def find_sharp_prob(sharp_data, player, target_line):
     for book in sharp_data.get('bookmakers', []):
         for mkt in book.get('markets', []):
             for outcome in mkt.get('outcomes', []):
-                # Loose matching: Check if name matches (or description)
-                name_match = (outcome.get('name') == player) or (outcome.get('description') == player)
-                
-                if name_match:
-                    # Strict Line Matching
+                # Check Name Match
+                if outcome['name'] == player or outcome.get('description') == player:
+                    # Check Line Match (within 0.1)
                     if abs(outcome.get('point', 0) - target_line) < 0.1:
                         # Convert Price to Prob
                         price = outcome.get('price', 0)
@@ -126,7 +123,6 @@ def find_sharp_prob(sharp_data, player, target_line):
     if probs: return sum(probs) / len(probs)
     return 0.0
 
-# --- RUN ---
 if st.button("🚀 Find Plays"):
     df = get_ev_data()
     if not df.empty:
@@ -134,4 +130,4 @@ if st.button("🚀 Find Plays"):
         st.success(f"Found {len(df)} Plays on {dfs_site}!")
         st.dataframe(df, use_container_width=True)
     else:
-        st.warning(f"No plays found on {dfs_site} for these games yet.")
+        st.warning(f"No {market_name} lines found on {dfs_site} for these games yet.")
