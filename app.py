@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 
 # --- CONFIGURATION ---
-# ⚠️ SECURITY: Replace this with your API Key or use st.secrets["ODDS_API_KEY"]
-API_KEY = "818d64a21306f003ad587fbb0bd5958b" 
+# ⚠️ SECURITY: Replace with your key or st.secrets["ODDS_API_KEY"]
+API_KEY = "818d64a21306f003ad587fbb0bd5958b"
 
 REGION = "us"
 DFS_REGION = "us_dfs"
@@ -14,63 +14,73 @@ SPORTS = {
     "Basketball (NBA)": "basketball_nba",
     "Football (NFL)": "americanfootball_nfl",
     "Ice Hockey (NHL)": "icehockey_nhl",
-    "Tennis (ATP/WTA)": "tennis_atp_wta_all",
+    "Tennis (ATP)": "tennis_atp_wta_all", # Check availability
     "Golf (PGA)": "golf_pga_tour",
     "Soccer (EPL)": "soccer_epl"
 }
 
-# 2. MARKETS MAPPING (Which props belong to which sport?)
+# 2. MARKETS MAPPING (Strictly Player Props)
 MARKETS = {
     "Basketball (NBA)": {
         "Points": "player_points",
         "Rebounds": "player_rebounds",
         "Assists": "player_assists",
-        "Threes": "player_threes",
+        "Threes Made": "player_threes",
         "Blocks": "player_blocks",
-        "Steals": "player_steals"
+        "Steals": "player_steals",
+        "Turnovers": "player_turnovers"
     },
     "Football (NFL)": {
         "Passing Yards": "player_pass_yds",
-        "Rushing Yards": "player_rush_yds",
-        "Receiving Yards": "player_reception_yds",
-        "Touchdowns": "player_anytime_td"
+        "Pass TDs": "player_pass_tds",
+        "Rush Yards": "player_rush_yds",
+        "Rec Yards": "player_reception_yds",
+        "Anytime TD": "player_anytime_td_scorer"
     },
     "Ice Hockey (NHL)": {
         "Goals": "player_goals_scored",
         "Assists": "player_assists",
         "Points": "player_points",
-        "Shots on Goal": "player_shots_on_goal"
+        "Shots on Goal": "player_shots_on_goal",
+        "Power Play Points": "player_power_play_points"
     },
-    "Tennis (ATP/WTA)": {
-        "Match Winner": "h2h", 
-        "Set Winner": "h2h_set_winner" 
+    "Tennis (ATP)": {
+        "Total Aces": "player_aces", # Note: Odds API support varies
+        "Double Faults": "player_double_faults"
     },
     "Golf (PGA)": {
-        "Tournament Winner": "h2h_winner"
+        "Round Score": "player_round_score", # Note: Odds API support varies
+        "Birdies": "player_birdies"
     },
     "Soccer (EPL)": {
-        "Goals": "player_goals_scored"
+        "Goals": "player_goals_scored",
+        "Assists": "player_assists",
+        "Shots on Target": "player_shots_on_target"
     }
 }
 
-st.set_page_config(page_title="SharpStake Pro", layout="wide")
-st.title("🚀 SharpStake Pro: Multi-Sport EV Finder")
+st.set_page_config(page_title="SharpStake Pro | Props Only", layout="wide")
+st.title("🎯 SharpStake Pro: Player Props Engine")
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR ---
 selected_sport_name = st.sidebar.selectbox("Select Sport", list(SPORTS.keys()))
 sport_key = SPORTS[selected_sport_name]
 
-# Dynamically show markets based on selected sport
+# Dynamic Markets Dropdown
 available_markets = MARKETS.get(selected_sport_name, {})
-selected_market_name = st.sidebar.selectbox("Select Prop", list(available_markets.keys()))
+if not available_markets:
+    st.error("No player props configured for this sport yet.")
+    st.stop()
+
+selected_market_name = st.sidebar.selectbox("Select Prop Type", list(available_markets.keys()))
 market_key = available_markets[selected_market_name]
 
 dfs_sites = st.sidebar.multiselect("Select DFS Apps", ["PrizePicks", "Underdog Fantasy", "Betr", "DraftKings Pick6"], default=["PrizePicks"])
-min_ev = st.sidebar.slider("Minimum EV %", 0.0, 15.0, 3.0)
+min_ev = st.sidebar.slider("Minimum EV %", 0.0, 15.0, 2.0)
 
 # --- THE ENGINE ---
 def get_ev_data(sport, market):
-    st.info(f"Scanning {sport} market for '{selected_market_name}'...")
+    st.info(f"Scanning {sport} for {selected_market_name} lines...")
     
     # 1. Fetch Games
     events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
@@ -82,13 +92,13 @@ def get_ev_data(sport, market):
 
     all_data = []
     
-    # LIMIT to first 5 games to save quota
-    for event in events[:5]:
+    # LIMIT: Check first 3 games to save quota
+    for event in events[:3]:
         game_id = event['id']
         game_name = f"{event['home_team']} vs {event['away_team']}"
         
         # 2. Get DFS Lines
-        odds_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{game_id}/odds"
+        dfs_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{game_id}/odds"
         dfs_params = {
             "apiKey": API_KEY,
             "regions": DFS_REGION,
@@ -96,14 +106,14 @@ def get_ev_data(sport, market):
             "oddsFormat": "american",
             "bookmakers": "prizepicks,underdog,betr"
         }
-        dfs_resp = requests.get(odds_url, params=dfs_params)
+        dfs_resp = requests.get(dfs_url, params=dfs_params)
         dfs_data = dfs_resp.json()
         
-        # 3. Get Sharp Odds (Pinnacle/DK)
+        # 3. Get Sharp Odds
         sb_params = dfs_params.copy()
         sb_params['regions'] = REGION
-        sb_params['bookmakers'] = "draftkings,fanduel,pinnacle"
-        sb_resp = requests.get(odds_url, params=sb_params)
+        sb_params['bookmakers'] = "draftkings,fanduel,pinnacle,caesars"
+        sb_resp = requests.get(dfs_url, params=sb_params)
         sb_data = sb_resp.json()
 
         # 4. Match Logic
@@ -141,10 +151,13 @@ def find_sharp_prob(sb_data, player_name, target_line):
         for mkt in book.get('markets', []):
             for outcome in mkt.get('outcomes', []):
                 if outcome['name'] == player_name:
-                    # Match line within 0.1 or Exact Match for non-points (like TD)
-                    if abs(outcome.get('point', 0) - target_line) < 0.1:
-                         # Assume we are looking for "Over" logic for now
-                         if 'Over' in outcome.get('name', '') or outcome.get('name') == 'Yes':
+                    # Logic: Must match line EXACTLY or be "Anytime TD" (no line)
+                    is_line_match = abs(outcome.get('point', 0) - target_line) < 0.1
+                    is_anytime_prop = target_line == 0 # e.g. Anytime TD
+                    
+                    if is_line_match or is_anytime_prop:
+                         # Assume 'Over' or 'Yes' is what we want
+                         if outcome.get('name') in ['Over', 'Yes']:
                              odds = outcome['price']
                              probs.append(american_to_prob(odds))
     
@@ -156,7 +169,7 @@ def american_to_prob(odds):
     else: return (-odds) / (-odds + 100)
 
 # --- RUN BUTTON ---
-if st.button("🚀 Find +EV Plays"):
+if st.button("🚀 Find +EV Props"):
     with st.spinner("Analyzing Markets..."):
         df = get_ev_data(sport_key, market_key)
         
@@ -164,7 +177,7 @@ if st.button("🚀 Find +EV Plays"):
             # Filter & Sort
             df_filtered = df[df['EV%'] >= min_ev].sort_values(by="EV%", ascending=False)
             
-            st.success(f"Found {len(df_filtered)} Plays!")
+            st.success(f"Found {len(df_filtered)} Props!")
             st.dataframe(
                 df_filtered,
                 column_config={
@@ -178,5 +191,4 @@ if st.button("🚀 Find +EV Plays"):
                 use_container_width=True
             )
         else:
-            st.error("No matching plays found. (API limit or no lines available)")
-
+            st.error("No matching props found. (API limit or no lines available)")
