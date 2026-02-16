@@ -7,172 +7,166 @@ API_KEY = "818d64a21306f003ad587fbb0bd5958b"
 REGION = "us"
 DFS_REGION = "us_dfs"
 
-st.set_page_config(page_title="SharpStake Optimizer", layout="wide")
+st.set_page_config(page_title="SharpStake Pro", layout="wide")
 
-# --- CUSTOM CSS (Make it look like OddsJam) ---
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
     .stDataFrame { font-size: 14px; }
     div[data-testid="stMetricValue"] { font-size: 18px; }
-    .ev-green { color: #00ff00; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ SharpStake Fantasy Optimizer")
+st.title("⚡ SharpStake: Auto-Scan Optimizer")
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Settings")
-    sport_key = st.selectbox("Sport", ["basketball_nba", "icehockey_nhl", "soccer_epl"], index=1)
+    # 1. Select Sport
+    sport_map = {
+        "NBA": "basketball_nba",
+        "NHL": "icehockey_nhl", 
+        "College Basketball": "basketball_ncaab",
+        "Soccer (EPL)": "soccer_epl"
+    }
+    sport_name = st.selectbox("Sport", list(sport_map.keys()))
+    sport_key = sport_map[sport_name]
+    
+    # 2. Select DFS Site
     dfs_site = st.selectbox("DFS Site", ["PrizePicks", "Underdog Fantasy"])
     
-    # Dynamic Break-Even Rates
+    # 3. EV Filter
+    min_ev = st.slider("Min EV %", 0.0, 10.0, 1.5)
+    
+    # Break-Even Logic
     break_even = 54.34 if dfs_site == "PrizePicks" else 55.0
-    st.caption(f"Break-Even Win %: **{break_even}%**")
-    
-    min_ev = st.slider("Min EV %", 0.0, 15.0, 1.5)
-    
-    # Market Filter
-    market_map = {
-        "basketball_nba": "player_points",
-        "icehockey_nhl": "player_points", 
-        "soccer_epl": "player_goals_scored"
-    }
-    market_key = market_map.get(sport_key, "player_points")
+    st.caption(f"Break-Even: **{break_even}%**")
+
+# --- MARKETS TO SCAN (AUTO) ---
+# When you pick a sport, we automatically scan ALL these props
+MARKETS_CONFIG = {
+    "basketball_nba": ["player_points", "player_rebounds", "player_assists", "player_threes"],
+    "icehockey_nhl": ["player_points", "player_goals_scored", "player_assists"],
+    "basketball_ncaab": ["player_points"],
+    "soccer_epl": ["player_goals_scored"]
+}
 
 # --- ENGINE ---
-def get_optimizer_data():
+def scan_all_markets():
     all_rows = []
+    markets_to_scan = MARKETS_CONFIG.get(sport_key, [])
     
-    # 1. Get Games
+    # 1. Get Games (Once)
     events = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport_key}/events", params={"apiKey": API_KEY}).json()
     if not events: return pd.DataFrame()
-
+    
     # Progress Bar
-    progress_text = "Scanning Sharps..."
-    my_bar = st.progress(0, text=progress_text)
+    progress_bar = st.progress(0, text="Starting Scan...")
+    total_steps = len(events[:3]) * len(markets_to_scan) # Limit to 3 games for speed
+    current_step = 0
     
-    # SCAN FIRST 5 GAMES
-    for i, event in enumerate(events[:5]):
-        game_id = event['id']
-        game_label = f"{event['home_team']} vs {event['away_team']}"
-        my_bar.progress((i + 1) * 20, text=f"Checking {game_label}...")
-
-        # 2. Get DFS & Sharp Odds in Parallel
-        # (For speed, we'd use async, but this is simple sync code)
+    # 2. Loop through Games
+    for game in events[:3]: # Limit 3 games
+        game_label = f"{game['home_team']} vs {game['away_team']}"
+        game_id = game['id']
         
-        # A. DFS Lines
-        dfs_resp = requests.get(
-            f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
-            params={"apiKey": API_KEY, "regions": DFS_REGION, "markets": market_key, "oddsFormat": "american", "bookmakers": dfs_site.lower().replace(" ", "")}
-        ).json()
-        
-        # B. Sharp Lines (Pinnacle/DK)
-        sharp_resp = requests.get(
-            f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
-            params={"apiKey": API_KEY, "regions": REGION, "markets": market_key, "oddsFormat": "american", "bookmakers": "pinnacle,draftkings"}
-        ).json()
-
-        if not dfs_resp.get('bookmakers'): continue
-
-        # 3. MATCH LOGIC
-        dfs_book = dfs_resp['bookmakers'][0]
-        for mkt in dfs_book.get('markets', []):
-            for outcome in mkt.get('outcomes', []):
-                player = outcome['name']
-                line = outcome.get('point', 0)
-                
-                # Find Sharp Odds for this specific line
-                best_side, win_prob, sharp_odds_str = find_sharp_edge(sharp_resp, player, line)
-                
-                if win_prob > 0:
-                    ev = (win_prob * 100) - break_even
+        # 3. Loop through ALL Markets (Points, Rebs, Asts)
+        for market in markets_to_scan:
+            current_step += 1
+            progress_bar.progress(int((current_step / total_steps) * 90), text=f"Scanning {market} in {game_label}...")
+            
+            # A. Get DFS Lines
+            dfs_resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
+                params={"apiKey": API_KEY, "regions": DFS_REGION, "markets": market, "oddsFormat": "american", "bookmakers": dfs_site.lower().replace(" ", "")}
+            ).json()
+            
+            # Skip if no lines
+            if not dfs_resp.get('bookmakers'): continue
+            
+            # B. Get Sharp Odds (Only if DFS lines exist)
+            sharp_resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{game_id}/odds",
+                params={"apiKey": API_KEY, "regions": REGION, "markets": market, "oddsFormat": "american", "bookmakers": "pinnacle,draftkings"}
+            ).json()
+            
+            # C. Match & Calculate
+            dfs_book = dfs_resp['bookmakers'][0]
+            for mkt in dfs_book.get('markets', []):
+                for outcome in mkt.get('outcomes', []):
+                    player = outcome['name']
+                    line = outcome.get('point', 0)
                     
-                    if ev >= min_ev:
-                        all_rows.append({
-                            "Player": player,
-                            "Game": game_label,
-                            "Prop": market_key.replace("player_", "").title(),
-                            "Line": line,
-                            "Pick": best_side.upper(),
-                            "Sharp Odds": sharp_odds_str,
-                            "Win %": win_prob * 100, # Keep as number for sorting
-                            "EV %": ev               # Keep as number for sorting
-                        })
+                    # Find Sharp Edge
+                    best_side, win_prob, sharp_str = find_sharp_edge(sharp_resp, player, line)
+                    
+                    if win_prob > 0:
+                        ev = (win_prob * 100) - break_even
+                        if ev >= min_ev:
+                            all_rows.append({
+                                "Player": player,
+                                "Prop": market.replace("player_", "").title().replace("_scored", ""),
+                                "Line": line,
+                                "Pick": best_side, # Over/Under
+                                "Game": game_label,
+                                "EV %": ev,
+                                "Win %": win_prob * 100,
+                                "Sharp Odds": sharp_str
+                            })
     
-    my_bar.empty()
+    progress_bar.empty()
     return pd.DataFrame(all_rows)
 
 def find_sharp_edge(sharp_data, player, target_line):
     # Search for matching player + line
-    # Returns: (Best Side, Win %, Sharp Odds String)
-    
     for book in sharp_data.get('bookmakers', []):
         for mkt in book.get('markets', []):
             for outcome in mkt.get('outcomes', []):
-                # Loose Match
                 if outcome['name'] == player or outcome.get('description') == player:
                     if abs(outcome.get('point', 0) - target_line) < 0.1:
-                        
-                        # We found the line! Now check price.
                         price = outcome.get('price', 0)
-                        side = outcome.get('name', 'Over') # Usually 'Over' or 'Under'
+                        side = outcome.get('name', 'Over')
                         
-                        # Calculate Prob
+                        # Convert to Prob
                         if price > 0: prob = 100 / (price + 100)
                         else: prob = (-price) / (-price + 100)
                         
-                        # Format "Sharp Odds" text
-                        sharp_str = f"{book['title']}: {price}"
-                        
-                        return side, prob, sharp_str
-
+                        # Only return if this side is the "Favorite" (Prob > 50%)?
+                        # Or return whatever side we found. 
+                        # For simplicity, let's return this side.
+                        return side, prob, f"{book['title']}: {price}"
     return None, 0.0, ""
 
-# --- MAIN UI ---
-if st.button("🔄 Refresh Optimizer"):
-    df = get_optimizer_data()
+# --- AUTO-RUN LOGIC ---
+# We use session state to run once on load, or when button clicked
+if 'data' not in st.session_state:
+    st.session_state.data = pd.DataFrame()
+
+if st.button("🔄 Scan All Markets"):
+    st.session_state.data = scan_all_markets()
+
+# Display Data
+df = st.session_state.data
+if not df.empty:
+    # Sort by EV
+    df = df.sort_values(by="EV %", ascending=False)
     
-    if not df.empty:
-        # Sort by EV
-        df = df.sort_values(by="EV %", ascending=False)
-        
-        # Metric Cards at Top
-        top_play = df.iloc[0]
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Top Play", top_play['Player'])
-        col2.metric("Pick", f"{top_play['Pick']} {top_play['Line']}")
-        col3.metric("EV", f"{top_play['EV %']:.1f}%")
-        
-        st.divider()
-        
-        # THE OPTIMIZER TABLE
-        st.dataframe(
-            df,
-            column_config={
-                "Player": st.column_config.TextColumn("Player", width="medium"),
-                "Game": st.column_config.TextColumn("Matchup", width="small"),
-                "Prop": st.column_config.TextColumn("Prop", width="small"),
-                "Line": st.column_config.NumberColumn("Line", format="%.1f"),
-                "Pick": st.column_config.TextColumn("Pick", width="small"),
-                "Sharp Odds": st.column_config.TextColumn("Sharp Odds", width="medium"),
-                
-                "Win %": st.column_config.ProgressColumn(
-                    "Win %",
-                    format="%.1f%%",
-                    min_value=50,
-                    max_value=75,
-                ),
-                "EV %": st.column_config.ProgressColumn(
-                    "Edge (EV)",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=15,
-                ),
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    else:
-        st.warning(f"No +EV plays found for {sport_key} on {dfs_site}.")
-        st.info("Try lowering the Min EV % or switching sports.")
+    # Top Plays Metrics
+    top = df.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Top Player", top['Player'])
+    c2.metric("Prop", f"{top['Prop']} {top['Line']}")
+    c3.metric("Pick", top['Pick'])
+    c4.metric("EV", f"{top['EV %']:.1f}%", delta_color="normal")
+    
+    st.dataframe(
+        df,
+        column_config={
+            "Win %": st.column_config.ProgressColumn("Win %", format="%.1f%%", min_value=50, max_value=70),
+            "EV %": st.column_config.ProgressColumn("EV %", format="%.1f%%", min_value=0, max_value=15),
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("Click 'Scan All Markets' to start.")
