@@ -1,73 +1,87 @@
-
-import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
+import time
 
-# --- CONFIGURATION ---
-API_KEY = "818d64a21306f003ad587fbb0bd5958b"
-REGION = "us_dfs" # Force DFS Region check
+API_KEY = "YOUR_API_KEY_HERE"  # Paste your key here
 
-st.set_page_config(page_title="SharpStake Debugger", layout="wide")
-st.title("🛠️ SharpStake Data Inspector")
+# The list of markets we want to fetch (Comma separated string)
+# Note: The API allows multiple markets in one call, but keep it reasonable.
+MARKETS_STRING = "player_points,player_rebounds,player_assists,player_threes"
 
-# --- CONTROLS ---
-sport = st.selectbox("Sport", ["icehockey_nhl", "basketball_ncaab", "soccer_epl"])
-market = st.selectbox("Market", ["player_points", "player_goals_scored"])
-
-if st.button("Fetch Raw Data"):
-    st.info(f"Fetching raw JSON for {sport} / {market}...")
+def get_player_props(sport):
+    print(f"Fetching props for {sport}...")
     
-    # 1. Get Events
-    events = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/events", params={"apiKey": API_KEY}).json()
+    # 1. Get the odds
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
+    params = {
+        "apiKey": API_KEY,
+        "regions": "us",  # "us" for US books, "us2" for more
+        "markets": MARKETS_STRING, 
+        "oddsFormat": "decimal",
+        "bookmakers": "draftkings,fanduel,mgm,caesars" # Limit to major books to save data size
+    }
+
+    response = requests.get(url, params=params)
     
-    if not events:
-        st.error("❌ No games found in API response.")
-    else:
-        st.success(f"✅ Found {len(events)} games.")
+    if response.status_code != 200:
+        print(f"Error: {response.status_code} - {response.text}")
+        return []
+
+    data = response.json()
+    
+    # 2. Parse the complex JSON into a flat list
+    all_props = []
+
+    for game in data:
+        game_title = f"{game['home_team']} vs {game['away_team']}"
+        commence_time = game['commence_time']
         
-        all_lines = []
-        
-        # Check first 3 games
-        for event in events[:3]:
-            game_label = f"{event['home_team']} vs {event['away_team']}"
-            game_id = event['id']
+        for bookmaker in game['bookmakers']:
+            book_name = bookmaker['title']
             
-            # 2. Get Odds (NO FILTERING)
-            odds = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport}/events/{game_id}/odds",
-                params={
-                    "apiKey": API_KEY,
-                    "regions": REGION, # Check DFS region specifically
-                    "markets": market,
-                    "oddsFormat": "american",
-                }
-            ).json()
-            
-            # 3. Parse and Dump Everything
-            if 'bookmakers' in odds:
-                for book in odds['bookmakers']:
-                    book_name = book['title']
-                    for mkt in book['markets']:
-                        for outcome in mkt['outcomes']:
-                            all_lines.append({
-                                "Game": game_label,
-                                "Book": book_name,
-                                "Player": outcome['name'], # Or description
-                                "Line": outcome.get('point', 'N/A'),
-                                "Price": outcome.get('price', 'N/A')
-                            })
-                            
-        if all_lines:
-            st.write(f"### Found {len(all_lines)} Raw Lines")
-            df = pd.DataFrame(all_lines)
-            st.dataframe(df, use_container_width=True)
-            
-            # Check specifically for PrizePicks
-            pp_lines = df[df['Book'].str.contains("PrizePicks", case=False)]
-            if not pp_lines.empty:
-                st.success(f"🎉 FOUND {len(pp_lines)} PRIZEPICKS LINES!")
-                st.dataframe(pp_lines)
-            else:
-                st.warning("⚠️ No PrizePicks lines found in this batch.")
-        else:
-            st.warning("⚠️ API returned valid game, but 'bookmakers' list was empty.")
+            for market in bookmaker['markets']:
+                market_key = market['key'] # e.g., "player_points"
+                
+                for outcome in market['outcomes']:
+                    # This is where the actual line is
+                    player_name = outcome['description']
+                    bet_name = outcome['name'] # "Over" or "Under"
+                    line = outcome.get('point') # The handicap (e.g., 20.5)
+                    price = outcome['price'] # The odds (e.g., 1.91)
+                    
+                    if line is not None: # Only keep lines with a point value
+                        all_props.append({
+                            "Sport": sport,
+                            "Game": game_title,
+                            "Date": commence_time,
+                            "Player": player_name,
+                            "Market": market_key,
+                            "Book": book_name,
+                            "Type": bet_name,
+                            "Line": line,
+                            "Odds": price
+                        })
+    
+    return all_props
+
+# --- MAIN EXECUTION ---
+final_data = []
+
+# Loop through sports (NCAAB is the priority today)
+for sport in ["basketball_ncaab", "icehockey_nhl"]:
+    props = get_player_props(sport)
+    final_data.extend(props)
+    time.sleep(1) # Be polite to the API
+
+# Convert to DataFrame
+df = pd.DataFrame(final_data)
+
+if not df.empty:
+    print(f"Successfully scraped {len(df)} lines!")
+    # Show top 5 rows
+    print(df.head())
+    
+    # Optional: Save to CSV
+    df.to_csv("todays_player_props.csv", index=False)
+else:
+    print("No props found. Are games posted yet? (Try again around 11 AM ET)")
